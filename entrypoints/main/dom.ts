@@ -22,11 +22,48 @@ export const inlineSet = new Set([
     'img', 'br', 'wbr', 'svg'
 ]);
 
+// 硬编码：永不需要翻译的常用词（大小写不敏感匹配）
+const SKIP_WORDS = new Set([
+    // === 科技品牌/产品 ===
+    'google', 'apple', 'microsoft', 'amazon', 'facebook', 'meta',
+    'twitter', 'instagram', 'youtube', 'tiktok', 'whatsapp', 'telegram',
+    'spotify', 'netflix', 'discord', 'twitch', 'snapchat', 'pinterest',
+    'linkedin', 'reddit', 'quora', 'medium', 'wikipedia', 'wikimedia',
+    'github', 'gitlab', 'bitbucket', 'stackoverflow',
+    'openai', 'chatgpt', 'claude', 'gemini', 'copilot', 'deepseek',
+    'samsung', 'sony', 'intel', 'amd', 'nvidia', 'qualcomm',
+    'xiaomi', 'huawei', 'oppo', 'vivo', 'oneplus', 'realme',
+    'android', 'ios', 'ipados', 'macos', 'windows', 'linux', 'ubuntu',
+    'chrome', 'firefox', 'safari', 'edge', 'opera', 'brave',
+    'iphone', 'ipad', 'ipod', 'imac', 'macbook', 'airpods', 'apple watch',
+    'playstation', 'xbox', 'nintendo', 'switch', 'steam', 'epic games',
+    // === 技术术语 ===
+    'wifi', 'bluetooth', 'ethernet', 'nfc', 'rfid', 'hdmi', 'usb-c',
+    'javascript', 'typescript', 'python', 'rust', 'golang', 'kotlin',
+    'node.js', 'react', 'vue', 'angular', 'django', 'flask',
+    'docker', 'kubernetes', 'nginx', 'apache', 'tomcat',
+    'mysql', 'postgresql', 'mongodb', 'redis', 'elasticsearch',
+    'aws', 'azure', 'gcp', 'heroku', 'vercel', 'netlify', 'cloudflare',
+    // === 常用协议/格式 ===
+    'http', 'https', 'ftp', 'smtp', 'tcp', 'udp', 'dns', 'vpn',
+    'ssl', 'tls', 'ssh', 'rdp', 'smtp', 'imap', 'pop3',
+    // === 社交媒体/流行语 ===
+    'emoji', 'meme', 'gif', 'selfie', 'vlog', 'podcast', 'webinar',
+    'cookies', 'cache', 'spam', 'phishing', 'malware', 'ransomware',
+    // === 品牌/商标 ===
+    'coca-cola', 'pepsi', 'mcdonald', 'starbucks', 'nike', 'adidas',
+    'bmw', 'mercedes', 'toyota', 'honda', 'tesla', 'ferrari', 'porsche',
+    // === 常见缩写 ===
+    'lte', '4g', '5g', '3g', 'volte', 'wlan', 'lan', 'wan',
+    'oled', 'lcd', 'amoled', 'qled', 'hdr', 'uhd', 'fhd', 'qhd',
+]);
+
 // 传入父节点，返回所有需要翻译的 DOM 元素数组
 export function grabAllNode(rootNode: Node): Element[] {
     if (!rootNode) return [];
 
     const result: Element[] = [];
+    const MAX_NODES = 800; // 防止超大页面卡死主线程
 
     const walker = document.createTreeWalker(
         rootNode,
@@ -46,44 +83,20 @@ export function grabAllNode(rootNode: Node): Element[] {
                     return NodeFilter.FILTER_REJECT;
                 }
 
-                // 在初始全局翻译时 跳过header与footer
-                if (tag === 'header' || tag === 'footer') {
+                // 跳过 header、footer 和表格结构标签
+                if (tag === 'header' || tag === 'footer' ||
+                    tag === 'colgroup' || tag === 'col') {
                     return NodeFilter.FILTER_REJECT;
                 }
 
-                // 检查是否只包含有效文本内容
-                let hasText = false;
-                let hasElement = false;
-                let hasNonEmptyElement = false;
+                // 性能优化：用 textContent 和 children.length 替代遍历 childNodes
+                // 原先对每个元素遍历所有子节点，在大表格中极其昂贵
+                const text = node.textContent?.trim();
+                if (!text) return NodeFilter.FILTER_REJECT;
 
-                for (const child of node.childNodes) {
-                    if (child.nodeType === Node.ELEMENT_NODE) {
-                        hasElement = true;
-                        // 检查子元素是否包含文本
-                        if (child.textContent?.trim()) {
-                            hasNonEmptyElement = true;
-                        }
-                    }
-                    if (child.nodeType === Node.TEXT_NODE && child.textContent?.trim()) {
-                        hasText = true;
-                    }
-                }
+                if (node.children.length > 0) return NodeFilter.FILTER_SKIP;
 
-                // 如果有非空子元素，跳过当前节点
-                if (hasNonEmptyElement) {
-                    return NodeFilter.FILTER_SKIP;
-                }
-
-                if (hasText && !hasElement) {
-                    return NodeFilter.FILTER_ACCEPT;
-                }
-
-                // 如果有子元素，继续遍历
-                if (node.childNodes.length > 0) {
-                    return NodeFilter.FILTER_SKIP;
-                }
-
-                return NodeFilter.FILTER_REJECT;
+                return NodeFilter.FILTER_ACCEPT;
             }
         }
     );
@@ -91,6 +104,7 @@ export function grabAllNode(rootNode: Node): Element[] {
     // 遍历出所有可翻译的节点
     let currentNode: Node | null;
     while (currentNode = walker.nextNode()) {
+        if (result.length >= MAX_NODES) break;
         const translateNode = grabNode(currentNode as Element | Text);
         if (translateNode) {
             result.push(translateNode);
@@ -98,7 +112,7 @@ export function grabAllNode(rootNode: Node): Element[] {
             walker.currentNode = currentNode.nextSibling || currentNode;
         }
     }
-    return Array.from(new Set(result));;
+    return Array.from(new Set(result));
 }
 
 // 返回最终应该翻译的父节点或 false
@@ -180,41 +194,19 @@ function checkTextSize(node: any): boolean {
         node.textContent.length < 3;
 }
 
-// 检查节点内容是否主要为数字
+// 检查节点内容是否主要为数字/无需翻译
 function isMainlyNumericContent(node: any): boolean {
     if (!node || !node.textContent) return false;
-    
+
     const text = node.textContent.trim();
     if (!text) return false;
-    
-    // 如果内容很短，且是纯数字格式，则跳过
-    // 对于短文本，直接判断整体是否为数字格式
-    if (text.length < 30 && isNumericContent(text)) return true;
-    
+
+    // 先检查整体文本是否无需翻译（纯数字、技术符号、缩写等）
+    if (isNumericContent(text) || isUntranslatableText(text)) return true;
+
     // 检查是否为用户名或用户ID格式
     if (isUserIdentifier(text)) return true;
-    
-    // 对于较长的内容，检查是否主要为数字格式
-    // 处理节点可能含有多个文本子节点的情况
-    // 这有助于更精确地识别混合内容中的数字部分
-    const textNodes = [];
-    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null);
-    let textNode;
-    while (textNode = walker.nextNode()) {
-        const nodeText = textNode.textContent?.trim() || '';
-        if (nodeText) {
-            textNodes.push(nodeText);
-        }
-    }
-    
-    // 如果只有一个文本节点且为数字，则跳过翻译
-    if (textNodes.length === 1 && isNumericContent(textNodes[0])) return true;
-    
-    // 如果所有文本节点都是数字，则跳过翻译
-    // 这可能是表格中的数字列或者纯数字列表等
-    if (textNodes.length > 0 && textNodes.every(t => isNumericContent(t))) return true;
-    
-    // 否则不跳过，允许翻译
+
     return false;
 }
 
@@ -286,6 +278,15 @@ function isNumericContent(text: string): boolean {
     
     // 检查是否为范围数字 (例如: 1-123)
     if (/^\d+\s*[-~]\s*\d+$/.test(trimmedText)) return true;
+
+    // 检查是否为分辨率/尺寸格式 (例如: 320x240, 1920×1080, 640*480)
+    if (/^\d+\s*[x×X\*]\s*\d+$/i.test(trimmedText)) return true;
+
+    // 检查是否为比例格式 (例如: 16:9, 4:3)
+    if (/^\d+\s*[:：]\s*\d+$/.test(trimmedText)) return true;
+
+    // 检查是否为分数格式 (例如: 1/2, 3/4)
+    if (/^\d+\/\d+$/.test(trimmedText)) return true;
     
     // 检查是否为小数
     if (/^-?\d+\.\d+$/.test(trimmedText)) return true;
@@ -318,6 +319,33 @@ function isNumericContent(text: string): boolean {
 
     // #数字 格式的
     if (/^#[\d]+$/.test(trimmedText)) return true;
+
+    return false;
+}
+
+/**
+ * 检查文本是否为无需翻译的内容（比 isNumericContent 更广）
+ *
+ * 规则：
+ * 0. 硬编码常用词 → 不翻译（如 Google, iPhone, WiFi, GitHub）
+ * 1. 英文字母总数 ≤ 2 → 视为技术符号/数字后缀，不翻译（如 4.61K, x86, K1）
+ * 2. 纯大写缩写，长度 2-5 → 不翻译（如 USB, NBA, CCTV, HTML）
+ */
+function isUntranslatableText(text: string): boolean {
+    if (!text || typeof text !== 'string') return false;
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+
+    // 规则0: 硬编码常用词（大小写不敏感）
+    if (SKIP_WORDS.has(trimmed.toLowerCase())) return true;
+
+    const letterCount = (trimmed.match(/[A-Za-z]/g) || []).length;
+
+    // 规则1: 英文字母总数 ≤ 2 → 技术符号/数字后缀，跳过
+    if (letterCount <= 2) return true;
+
+    // 规则2: 纯大写缩写，长度 2-5 → 跳过
+    if (/^[A-Z]{2,5}$/.test(trimmed)) return true;
 
     return false;
 }
@@ -364,6 +392,8 @@ function handleFirstLineText(node: any): boolean {
     let child = node.firstChild;
     while (child) {
         if (child.nodeType === Node.TEXT_NODE && child.textContent.trim()) {
+            // 跳过无需翻译的内容（数字、缩写、技术符号等）
+            if (isUntranslatableText(child.textContent)) return false;
             browser.runtime.sendMessage({
                 context: document.title,
                 origin: child.textContent

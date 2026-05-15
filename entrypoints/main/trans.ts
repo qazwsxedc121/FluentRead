@@ -15,6 +15,7 @@ export let originalContents = new Map(); // 保存原始内容
 let isAutoTranslating = false; // 控制是否继续翻译新内容
 let observer: IntersectionObserver | null = null; // 保存观察器实例
 let mutationObserver: MutationObserver | null = null; // 保存 DOM 变化观察器实例
+let batchTimer: ReturnType<typeof setTimeout> | null = null; // 分批翻译计时器
 
 // 使用自定义属性标记已翻译的节点
 const TRANSLATED_ATTR = 'data-fr-translated';
@@ -64,7 +65,13 @@ export function restoreOriginalContent() {
         mutationObserver = null;
     }
     
-    // 6. 重置所有翻译相关的状态
+    // 6. 清除分批计时器
+    if (batchTimer) {
+        clearTimeout(batchTimer);
+        batchTimer = null;
+    }
+
+    // 7. 重置所有翻译相关的状态
     isAutoTranslating = false;
     htmlSet.clear(); // 清空防抖集合
     nodeIdCounter = 0; // 重置节点ID计数器
@@ -98,21 +105,66 @@ export function autoTranslateEnglishPage() {
     isAutoTranslating = true;
 
     // 创建观察器
+    const BATCH_SIZE = 12; // 每批最多处理12个节点，防止大量转圈同时插入导致卡顿
+    const BATCH_DELAY = 200; // 批次间隔(ms)，等前一批的翻译请求发出后再处理下一批
+
     observer = new IntersectionObserver((entries, observer) => {
+        // 收集所有可见且未处理的节点，分离缓存命中和未命中的
+        const cachedNodes: Element[] = [];
+        const pendingNodes: Element[] = [];
+
         entries.forEach(entry => {
             if (entry.isIntersecting && isAutoTranslating) {
                 const node = entry.target as Element;
+                if (node.hasAttribute(TRANSLATED_ATTR)) return;
+
+                // 缓存命中的节点立即处理，不受批次限制
+                if (cache.localGet(node.outerHTML)) {
+                    cachedNodes.push(node);
+                } else {
+                    pendingNodes.push(node);
+                }
+            }
+        });
+
+        // 缓存命中的节点立即处理
+        cachedNodes.forEach(node => {
+            const nodeId = `fr-node-${nodeIdCounter++}`;
+            node.setAttribute(TRANSLATED_ID_ATTR, nodeId);
+            originalContents.set(nodeId, node.innerHTML);
+            node.setAttribute(TRANSLATED_ATTR, 'true');
+
+            if (config.display === styles.bilingualTranslation) {
+                handleBilingualTranslation(node, false);
+            } else {
+                handleSingleTranslation(node, false);
+            }
+            observer.unobserve(node);
+        });
+
+        if (!pendingNodes.length) return;
+
+        let batchIndex = 0;
+
+        function processBatch() {
+            if (!isAutoTranslating) return;
+
+            const start = batchIndex * BATCH_SIZE;
+            const end = Math.min(start + BATCH_SIZE, pendingNodes.length);
+
+            for (let i = start; i < end; i++) {
+                const node = pendingNodes[i];
 
                 // 去重
-                if (node.hasAttribute(TRANSLATED_ATTR)) return;
-                
+                if (node.hasAttribute(TRANSLATED_ATTR)) continue;
+
                 // 为节点分配唯一ID
                 const nodeId = `fr-node-${nodeIdCounter++}`;
                 node.setAttribute(TRANSLATED_ID_ATTR, nodeId);
-                
+
                 // 保存原始内容
                 originalContents.set(nodeId, node.innerHTML);
-                
+
                 // 标记为已翻译
                 node.setAttribute(TRANSLATED_ATTR, 'true');
 
@@ -125,7 +177,14 @@ export function autoTranslateEnglishPage() {
                 // 停止观察该节点
                 observer.unobserve(node);
             }
-        });
+
+            batchIndex++;
+            if (end < pendingNodes.length) {
+                batchTimer = setTimeout(processBatch, BATCH_DELAY);
+            }
+        }
+
+        processBatch();
     }, {
         root: null,
         rootMargin: '50px',

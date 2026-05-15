@@ -13,6 +13,9 @@ import { storage } from '@wxt-dev/storage';
 // 调试相关
 const isDev = process.env.NODE_ENV === 'development';
 
+// 在途请求去重：相同文本翻译进行中时，复用同一个 Promise
+const inFlightRequests = new Map<string, Promise<string>>();
+
 /**
  * 翻译API的统一入口
  * 所有翻译请求都应该通过此函数发送，以便集中管理队列和重试逻辑
@@ -46,13 +49,30 @@ export async function translateText(origin: string, context: string = document.t
     }
   }
 
+  // 在途请求去重：相同文本已有翻译进行中时，复用同一个 Promise
+  if (inFlightRequests.has(origin)) {
+    if (isDev) {
+      console.log('[翻译API] 命中在途去重，复用进行中的翻译请求');
+    }
+    return inFlightRequests.get(origin)!;
+  }
+
   // 增加翻译计数
   config.count++;
   // 保存配置以确保计数持久化
   storage.setItem('local:config', JSON.stringify(config));
 
   // 使用队列处理翻译请求
-  return enqueueTranslation(async () => {
+  // 先注册占位 Promise 到去重表（同步），防止并发调用创建重复请求
+  let resolvePromise: (value: string) => void;
+  let rejectPromise: (reason: any) => void;
+  const dedupPromise = new Promise<string>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  inFlightRequests.set(origin, dedupPromise);
+
+  const translationPromise = enqueueTranslation(async () => {
     // 创建翻译任务
     const translationTask = async (retryCount: number = 0): Promise<string> => {
       try {
@@ -95,6 +115,11 @@ export async function translateText(origin: string, context: string = document.t
     // 开始执行翻译任务
     return translationTask();
   });
+
+  // 将实际翻译结果传递给占位 Promise，并清理去重表
+  translationPromise.then(resolvePromise, rejectPromise);
+  dedupPromise.finally(() => inFlightRequests.delete(origin));
+  return dedupPromise;
 }
 
 /**

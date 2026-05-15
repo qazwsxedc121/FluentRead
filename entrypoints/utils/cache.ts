@@ -2,6 +2,7 @@ import { customModelString } from "./option";
 import { config } from "@/entrypoints/utils/config";
 
 const prefix = "flcache_"; // fluent read cache
+const MAX_CACHE_ITEMS = 1000; // 缓存条目上限，超过则清理最早的 20%
 
 // 构建缓存 key
 function buildKey(message: string) {
@@ -9,6 +10,21 @@ function buildKey(message: string) {
     const selectedModel = model[service] === customModelString ? customModel[service] : model[service];
     // 前缀_服务_模型_目标语言_消息
     return [prefix, style, service, selectedModel, to, message].join('_');
+}
+
+// 强制执行缓存上限，超过则批量清理最早的条目
+function enforceCacheLimit() {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(prefix)) keys.push(k);
+    }
+    if (keys.length >= MAX_CACHE_ITEMS) {
+        const toDelete = Math.ceil(keys.length * 0.2);
+        for (let i = 0; i < toDelete; i++) {
+            localStorage.removeItem(keys[i]);
+        }
+    }
 }
 
 export const cache = {
@@ -27,7 +43,8 @@ export const cache = {
     localSet(key: string, value: string) {
         // 如果禁用缓存，则不执行任何操作
         if (!config.useCache) return;
-        
+
+        enforceCacheLimit();
         localStorage.setItem(buildKey(key), value);
     },
 
